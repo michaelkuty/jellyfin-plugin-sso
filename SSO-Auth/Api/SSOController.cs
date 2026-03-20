@@ -201,7 +201,7 @@ public class SSOController : ControllerBase
                         // If we are not using JSON values, just use the raw info from the claim value
                         if (segments.Length == 1)
                         {
-                            roles = new List<string> { claim.Value };
+                            roles = TryParseRolesFromValue(claim.Value);
                         }
                         else
                         {
@@ -231,14 +231,23 @@ public class SSOController : ControllerBase
                                     }
                                 }
 
-                                if (missingSegment || !json.TryGetValue(segments[^1], out var rolesToken) || rolesToken is not JArray rolesArray)
+                                if (missingSegment || !json.TryGetValue(segments[^1], out var rolesToken))
                                 {
                                     roles = new List<string>();
                                 }
+                                else if (rolesToken is JArray rolesArray)
+                                {
+                                    roles = rolesArray.ToObject<List<string>>();
+                                }
+                                else if (rolesToken is JObject rolesObject)
+                                {
+                                    // Support providers like Zitadel where roles are JSON object keys
+                                    // e.g. {"jellyfin_admin": {"org_id": "org_domain"}, "jellyfin_user": {...}}
+                                    roles = rolesObject.Properties().Select(p => p.Name).ToList();
+                                }
                                 else
                                 {
-                                    // The final step is to take the JSON and turn it from a dictionary into a string
-                                    roles = rolesArray.ToObject<List<string>>();
+                                    roles = new List<string>();
                                 }
                             }
                         }
@@ -844,6 +853,40 @@ public class SSOController : ControllerBase
         user.AuthenticationProviderId = provider;
 
         return Ok();
+    }
+
+    /// <summary>
+    /// Attempts to parse a claim value as roles.
+    /// If the value is a JSON object, returns its top-level keys as role names.
+    /// This supports providers like Zitadel that encode roles as JSON object keys,
+    /// e.g. {"jellyfin_admin": {"org_id": "org_domain"}, "jellyfin_user": {...}}.
+    /// If the value is not valid JSON or is not an object, returns the raw value as a single role.
+    /// </summary>
+    private static List<string> TryParseRolesFromValue(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return new List<string>();
+        }
+
+        // Only attempt JSON parsing if the value looks like a JSON object
+        if (value.TrimStart().StartsWith("{", StringComparison.Ordinal))
+        {
+            try
+            {
+                var jsonObj = JsonConvert.DeserializeObject<IDictionary<string, object>>(value);
+                if (jsonObj != null)
+                {
+                    return jsonObj.Keys.ToList();
+                }
+            }
+            catch (JsonException)
+            {
+                // Not valid JSON, fall through to return raw value
+            }
+        }
+
+        return new List<string> { value };
     }
 
     private SerializableDictionary<string, Guid> GetCanonicalLinks(string mode, string provider)
